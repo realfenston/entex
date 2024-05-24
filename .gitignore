@@ -1,0 +1,10 @@
+__pycache__/
+esm/
+examples/
+language-quantized-autoencoders/
+RoseTTAFold-All-Atom/
+RoseTTAFold2NA/
+wandb/
+*.jsonl
+*.tsv
+checkpoint/

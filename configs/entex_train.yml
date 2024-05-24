@@ -1,0 +1,87 @@
+dataset:
+  path: ./data/entex_median.jsonl
+  train_ratio: 0.8
+
+train:
+  batch_size: 16
+  epochs: 100
+  model_type: lqae
+  accumulate_grad_batches: 1
+  dataloader_n_workers: 6
+  strategy: ddp
+  accelerator: gpu
+  cpu_device: 1
+  gpu_device: [4, 5, 6, 7]
+  num_nodes: 1
+  precision: 32
+  shuffle: true
+  strategy: ddp
+  gradient_clip_val: 5.0
+  fast_dev_run: false
+  num_workers: 6
+  val_check_interval: 1.0
+  resume: false
+  resume_from_checkpoint: ./entex/checkpoint/
+  save_path: ./entex/checkpoint/
+  save_monitor: validation_loss
+  save_every_n_step: 1000
+  save_top_k: 1
+
+logging:
+  log_every_n_steps: 1000
+  progress_bar_refresh_rate: 1000
+  wandb_project: entex_train_512_bs(32)
+  track_grad_norm: 2.0
+
+model:
+  track_grad_norm: true
+  hidden_dim: 512
+  resnet:
+    hidden_dim: 512
+    filters: 128
+    hidden_channels: [32,64,128]
+    channel_multipliers: [1024, 2048]
+    hidden_size: 768
+    conv_downsample: false
+    out_channels: 7
+    num_res_blocks: 3
+    output_dim: 6
+  bert:
+    bert_name: allenai/scibert_scivocab_uncased
+    bert_path: ./checkpoint/scibert_scivocab_uncased/
+    bert_min_ratio: 0.15
+    bert_max_ratio: 0.15
+    use_bert_codebook: true
+    bert_loss_mask_only: true
+    bert_mask_loss_weight: 0.25
+    use_bert_ste: true
+    hidden_dim: 768
+    max_position_embeddings: 1024
+    hidden_dropout_prob: 0.1
+  quantizer:
+    quantizer_loss_entropy: 0.25
+    entropy_temperature: 0.01
+    entropy_loss_type: softmax
+    quantizer_loss_commitment: 0.25
+    l2_normalize: false
+    top_k_value: 1
+    top_k_avg: false
+    top_k_rnd: false
+    quantizer_latent_dim: 768
+    strawman_codebook: false
+    strawman_codebook_init: normal:1.0
+    quantizer_loss_perplexity: 0.0
+    dot_product: false
+  bbencoder:
+    embed_dim: 512
+
+optimizer:
+  name: adam
+  learning_rate: 0.0001
+  weight_decay: 0.001
+  lr_scheduler: warmup_linear
+  warmup_steps: 16000
+  adam_betas: [0.9, 0.999]
+  max_steps: 100000
+
+seed: 42
