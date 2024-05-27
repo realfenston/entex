@@ -8,13 +8,12 @@ from tqdm import tqdm
 from .common import ESM_TOKENIZER
 
 
-class StrDataset(Dataset):
+class StructureDataset(Dataset):
     def __init__(self, data_config):
-        super(StrDataset, self).__init__()
-        self.dataset_path = data_config.path
+        super(StructureDataset, self).__init__()
         self.samples = []
 
-        with open(self.dataset_path, 'r') as data_f:
+        with open(data_config.path, 'r') as data_f:
             lines = data_f.readlines()
 
         for line in tqdm(lines):
@@ -42,7 +41,6 @@ class StrDataset(Dataset):
             x_pad = np.pad(x, [[0, L_max-l], [0,0], [0,0]], 'constant', constant_values=(np.nan, )) #[atom, 3, 3]
             X[i,:,:,:] = x_pad
 
-            # Convert to labels
             indices = np.array(ESM_TOKENIZER.encode(sample['seq'], add_special_tokens=False))
             S[i, :l] = indices
 
@@ -62,7 +60,6 @@ class StrDataset(Dataset):
         mask = np.isfinite(np.sum(X,(2,3))).astype(np.int32)
         X[isnan] = 0.0
 
-        #seq, structure crop
         L = S.shape[1]
         if L > max_seq_length:
             X = X[:, :max_seq_length, ...]
@@ -70,10 +67,10 @@ class StrDataset(Dataset):
             mask = mask[:, :max_seq_length]
 
         return {
-            "name": [b['name'] for b in batch],
+            "name": [sample['name'] for sample in batch],
             "X": torch.from_numpy(X).to(torch.float32),
             "S": torch.from_numpy(S).to(torch.long),
-            "mask": torch.from_numpy(mask).to(torch.long),
+            "mask": torch.from_numpy(mask).to(torch.bool),
         }
     
 
@@ -86,7 +83,6 @@ if __name__ == '__main__':
         config =  EasyDict(yaml.safe_load(f))
     
     dataset_config = config.dataset
-    dataset = StrDataset(dataset_config)
-    print(len(dataset))
+    dataset = StructureDataset(dataset_config)
 
-    StrDataset.featurize([dataset[0], dataset[1]])
+    StructureDataset.featurize([dataset[0], dataset[1]])

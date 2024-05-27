@@ -4,6 +4,18 @@ import torch
 from .scoring import *
 
 
+# ideal N, CA, C initial coordinates
+init_N = torch.tensor([-0.5272, 1.3593, 0.000]).float()
+init_CA = torch.zeros_like(init_N)
+init_C = torch.tensor([1.5233, 0.000, 0.000]).float()
+INIT_CRDS = torch.zeros((27, 3)).float()
+INIT_CRDS[:3] = torch.stack((init_N, init_CA, init_C), dim=0) # (3,3)
+
+norm_N = init_N / (torch.norm(init_N, dim=-1, keepdim=True) + 1e-5)
+norm_C = init_C / (torch.norm(init_C, dim=-1, keepdim=True) + 1e-5)
+cos_ideal_NCAC = torch.sum(norm_N*norm_C, dim=-1) # cosine of ideal N-CA-C bond angle
+
+
 PDB_CHAIN_IDS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
 
 num2aa=[

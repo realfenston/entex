@@ -21,8 +21,6 @@ def random_rot_trans(xyz, random_noise=20.0):
 
 
 def center_and_realign_missing(xyz, mask_t):
-    # xyz: (L, 27, 3)
-    # mask_t: (L, 27)
     L = xyz.shape[0]
     
     mask = mask_t[:,:3].all(dim=-1) # True for valid atom (L)
@@ -78,33 +76,33 @@ def th_dih(a,b,c,d):
 # build a frame from 3 points
 #fd  -  more complicated version splits angle deviations between CA-N and CA-C (giving more accurate CB position)
 #fd  -  makes no assumptions about input dims (other than last 1 is xyz)
-def rigid_from_3_points(N, Ca, C, is_na=None, eps=1e-8):
-    dims = N.shape[:-1]
-
+def rigid_from_3_points(N, Ca, C, non_ideal=False, eps=1e-8):
+    #N, Ca, C - [B,L, 3]
+    #R - [B,L, 3, 3], det(R)=1, inv(R) = R.T, R is a rotation matrix
+    B, L = N.shape[:2]
+    
     v1 = C-Ca
     v2 = N-Ca
     e1 = v1/(torch.norm(v1, dim=-1, keepdim=True)+eps)
-    u2 = v2-(torch.einsum('...li, ...li -> ...l', e1, v2)[...,None]*e1) # a,b -> abcos(theta)
+    u2 = v2-(torch.einsum('bli, bli -> bl', e1, v2)[...,None]*e1)
     e2 = u2/(torch.norm(u2, dim=-1, keepdim=True)+eps)
     e3 = torch.cross(e1, e2, dim=-1)
     R = torch.cat([e1[...,None], e2[...,None], e3[...,None]], axis=-1) #[B,L,3,3] - rotation matrix
     
-    v2 = v2/(torch.norm(v2, dim=-1, keepdim=True)+eps)
-    cosref = torch.sum(e1*v2, dim=-1)
-    costgt = torch.full(dims, -0.3616, device=N.device)
-    if is_na is not None:
-        costgt[is_na] = -0.4929
-
-    cos2del = torch.clamp( cosref*costgt + torch.sqrt((1-cosref*cosref)*(1-costgt*costgt)+eps), min=-1.0, max=1.0 )
-    cosdel = torch.sqrt(0.5*(1+cos2del)+eps)
-    sindel = torch.sign(costgt-cosref) * torch.sqrt(1-0.5*(1+cos2del)+eps)
-    Rp = torch.eye(3, device=N.device).repeat(*dims,1,1)
-    Rp[...,0,0] = cosdel
-    Rp[...,0,1] = -sindel
-    Rp[...,1,0] = sindel
-    Rp[...,1,1] = cosdel
-
-    R = torch.einsum('...ij,...jk->...ik', R,Rp)
+    if non_ideal:
+        v2 = v2/(torch.norm(v2, dim=-1, keepdim=True)+eps)
+        cosref = torch.clamp( torch.sum(e1*v2, dim=-1), min=-1.0, max=1.0) # cosine of current N-CA-C bond angle
+        costgt = cos_ideal_NCAC.item()
+        cos2del = torch.clamp( cosref*costgt + torch.sqrt((1-cosref*cosref)*(1-costgt*costgt)+eps), min=-1.0, max=1.0 )
+        cosdel = torch.sqrt(0.5*(1+cos2del)+eps)
+        sindel = torch.sign(costgt-cosref) * torch.sqrt(1-0.5*(1+cos2del)+eps)
+        Rp = torch.eye(3, device=N.device).repeat(B,L,1,1)
+        Rp[:,:,0,0] = cosdel
+        Rp[:,:,0,1] = -sindel
+        Rp[:,:,1,0] = sindel
+        Rp[:,:,1,1] = cosdel
+    
+        R = torch.einsum('blij,bljk->blik', R,Rp)
 
     return R, Ca
 
@@ -164,19 +162,16 @@ def generate_Cbeta(N,Ca,C):
 
 def get_tips(xyz, seq):
     B,L = xyz.shape[:2]
-
     xyz_tips = torch.gather(xyz, 2, tip_indices.to(xyz.device)[seq][:,:,None,None].expand(-1,-1,-1,3)).reshape(B, L, 3)
     if torch.isnan(xyz_tips).any(): # replace NaN tip atom with virtual Cb atom
-        # three anchor atoms
         N  = xyz[:,:,0]
         Ca = xyz[:,:,1]
         C  = xyz[:,:,2]
 
-        # recreate Cb given N,Ca,C
         b = Ca - N
         c = C - Ca
         a = torch.cross(b, c, dim=-1)
-        Cb = -0.58273431*a + 0.56802827*b - 0.54067466*c + Ca    
+        Cb = -0.58273431 * a + 0.56802827 * b - 0.54067466 * c + Ca    
 
         xyz_tips = torch.where(torch.isnan(xyz_tips), Cb, xyz_tips)
     return xyz_tips
@@ -613,3 +608,12 @@ def entropy_loss_fn(affinity, loss_type="softmax", temperature=1.0):
     sample_entropy = -torch.mean(torch.sum(target_probs * log_probs, dim=-1))
     loss = sample_entropy - avg_entropy
     return sample_entropy
+
+
+def get_t(N, Ca, C, non_ideal=False, eps=1e-5):
+    I,B,L = N.shape[:3]
+    Rs,Ts = rigid_from_3_points(N.view(I*B,L,3), Ca.view(I*B,L,3), C.view(I*B,L,3), non_ideal=non_ideal, eps=eps)
+    Rs = Rs.view(I,B,L,3,3)
+    Ts = Ts.view(I,B,L,3)
+    t = Ts[:,:,None] - Ts[:,:,:,None] # t[0,1] = residue 0 -> residue 1 vector
+    return torch.einsum('iblkj, iblmk -> iblmj', Rs, t) # (I,B,L,L,3)

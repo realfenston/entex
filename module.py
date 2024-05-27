@@ -9,18 +9,20 @@ from .auxiliary_modules import FeedForwardNetwork
 from .util import entropy_loss_fn
 
 
-class EEIEncoder(nn.Module):
-    def __init__(self, embed_dim, hidden_dim, rff=4, p_drop=0.1):
-        super(EEIEncoder, self).__init__()
+class Encoder(nn.Module):
+    def __init__(self, encode_dim, hidden_dim, rff=4, p_drop=0.1):
+        super(Encoder, self).__init__()
         self.model, self.alphabet = esm.pretrained.esm_if1_gvp4_t16_142M_UR50()
         for param in self.model.parameters():
             param.requires_grad = False
         
         #manually mock a trainable encoder, while freezing params in the original ESM encoder for memory issue
-        self.fc = nn.Linear(embed_dim, hidden_dim)
-        self.dropout = nn.Dropout(p_drop)
+        self.fc = nn.Linear(encode_dim, hidden_dim)
         self.activation = nn.GELU()
+        self.dropout = nn.Dropout(p_drop)
         self.ffn = FeedForwardNetwork(hidden_dim, rff, p_drop)
+        
+        self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, coords_list):
         batch_converter = CoordBatchConverter(self.alphabet, truncation_seq_length=1024)
@@ -28,10 +30,15 @@ class EEIEncoder(nn.Module):
             batch_converter([(coord, None, None) for coord in coords_list], device=coords_list.device)
         )
         encoder_out = self.model.encoder(batch_coords, padding_mask, confidence)
-        feat = encoder_out['encoder_out'][0].permute(1, 0, 2)[:,1:-1]
-        feat = self.activation(self.dropout(self.fc(feat)))
-        feat = self.ffn(feat)        
-        return {'feat': feat}
+        
+        feat = encoder_out['encoder_out'][0].permute(1, 0, 2)[:,1:-1] # this is due to esm legacy issue
+        x = torch.tensor(feat)
+        x = self.fc(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+        x = self.norm(x)
+        x = self.norm(self.ffn(x))
+        return x
 
 
 class CNNLayer(nn.Module):
@@ -48,9 +55,9 @@ class CNNLayer(nn.Module):
         return encodings
     
 
-class EEIDecoder(nn.Module):
+class Decoder(nn.Module):
     def __init__(self, resnet_config):
-        super(EEIDecoder, self).__init__()
+        super(Decoder, self).__init__()
         self.resnet_config = resnet_config
         self.layer_norm = nn.LayerNorm(self.resnet_config.hidden_dim)
         self.hidden_channels = [self.resnet_config.hidden_size] + self.resnet_config.channel_multipliers + [self.resnet_config.hidden_size]
@@ -106,13 +113,9 @@ class LanguageQuantizer(nn.Module):
         self.quantizer_config = quantizer_config
         self.codebook = codebook
         self.codebook.requires_grad = False
-        if self.quantizer_config.quantizer_latent_dim > 0:
-            self.input_to_latent = lambda x: x
-            self.code_to_latent = nn.Linear(self.quantizer_config.quantizer_latent_dim, hidden_dim)
-        else:
-            self.input_to_latent = lambda x: x
-            self.code_to_latent = lambda x: x
-
+        self.input_to_latent = nn.Linear(hidden_dim, quantizer_config.quantizer_hidden_dim)
+        self.code_to_latent = nn.Linear(self.quantizer_config.quantizer_latent_dim, quantizer_config.quantizer_hidden_dim)
+        
     @staticmethod
     def normalize_func(x, axis=None, eps=1e-6, use_l2_normalize=True):
         if use_l2_normalize:
@@ -178,11 +181,9 @@ class LanguageQuantizer(nn.Module):
             codebook_usage = codebook_usage / self.config.top_k_value"""
         result_dict = dict()
         if train:
-            # disable gradient for LQAE
-            latent_quantized = self.code_to_latent(quantized)
-            latent_quantized = latent_quantized.detach()
-            latent_x = self.input_to_latent(x)
-            result_dict = self.get_train_loss(latent_quantized, latent_x, distances)
+            #used in original paper, but quantized and x have a shape mismatch
+            #please ensure hidden dim == codebook dim here
+            result_dict = self.get_train_loss(quantized, x, distances) 
 
             if self.quantizer_config.strawman_codebook:
                 strawman_quantized = self.quantize_strawman(encodings)
@@ -199,7 +200,7 @@ class LanguageQuantizer(nn.Module):
                 for k, v in result_dict.items():
                     result_dict[k] = v + latent_result_dict[k]
 
-            latent_quantized = latent_x + (latent_quantized - latent_x).detach()
+            quantized = x + (quantized - x).detach()
 
         avg_probs = torch.mean(encodings.reshape(-1, encodings.shape[-1]), axis=0)
         log_perplexity = -torch.sum(avg_probs * torch.log(avg_probs + 1e-6))
@@ -370,7 +371,7 @@ class LanguageModel(nn.Module):
         else:
             shared_embedding = None
 
-        # Compute the prediction scores
+        #Compute the prediction scores
         #logits = self.lm_head(hidden_states, shared_embedding=shared_embedding)
         logits = torch.matmul(hidden_states, shared_embedding.T)
 

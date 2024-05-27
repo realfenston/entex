@@ -8,3 +8,4 @@ wandb/
 *.jsonl
 *.tsv
 checkpoint/
+checkpoint_test/

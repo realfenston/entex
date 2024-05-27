@@ -11,7 +11,7 @@ train:
   strategy: ddp
   accelerator: gpu
   cpu_device: 1
-  gpu_device: [4, 5, 6, 7]
+  gpu_device: [0, 1, 2, 3, 4, 5, 6, 7]
   num_nodes: 1
   precision: 32
   shuffle: true
@@ -26,21 +26,22 @@ train:
   save_monitor: validation_loss
   save_every_n_step: 1000
   save_top_k: 1
+  num_sanity_val_steps: 2
 
 logging:
   log_every_n_steps: 1000
   progress_bar_refresh_rate: 1000
-  wandb_project: entex_train_512_bs(32)
+  wandb_project: entex_train_hd(512)_bs(32)
   track_grad_norm: 2.0
 
 model:
   track_grad_norm: true
-  hidden_dim: 512
+  hidden_dim: 768
   resnet:
     hidden_dim: 512
-    filters: 128
-    hidden_channels: [32,64,128]
     channel_multipliers: [1024, 2048]
+    filters: 128
+    hidden_channels: [32, 64, 128]
     hidden_size: 768
     conv_downsample: false
     out_channels: 7
@@ -59,7 +60,7 @@ model:
     max_position_embeddings: 1024
     hidden_dropout_prob: 0.1
   quantizer:
-    quantizer_loss_entropy: 0.25
+    quantizer_loss_entropy: 0.0
     entropy_temperature: 0.01
     entropy_loss_type: softmax
     quantizer_loss_commitment: 0.25
@@ -71,16 +72,17 @@ model:
     strawman_codebook: false
     strawman_codebook_init: normal:1.0
     quantizer_loss_perplexity: 0.0
-    dot_product: false
+    dot_product: true
+    quantizer_hidden_dim: 512 #dim for hidden space
   bbencoder:
-    embed_dim: 512
+    encode_dim: 512
 
 optimizer:
   name: adam
   learning_rate: 0.0001
-  weight_decay: 0.001
+  weight_decay: 0.0001
   lr_scheduler: warmup_linear
-  warmup_steps: 16000
+  warmup_steps: 10000
   adam_betas: [0.9, 0.999]
   max_steps: 100000
 

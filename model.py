@@ -4,9 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModel, AutoTokenizer
 
+from .loss import calc_str_loss
 from .lr_schedulers import get
-from .module import EEIDecoder, EEIEncoder, LanguageModel, LanguageQuantizer, XYZConverter
-from .util import rigid_from_3_points
+from .module import Decoder, Encoder, LanguageModel, LanguageQuantizer, XYZConverter
 
 
 class LQAE_model(nn.Module):
@@ -16,9 +16,9 @@ class LQAE_model(nn.Module):
         self.lang_model, self.codebook, self.mask_code, self.tokenizer = self.config_language_model()
         self.codebook.requires_grad = False
 
+        self.encoder = Encoder(self.model_config.bbencoder.encode_dim, self.model_config.hidden_dim)
         self.quantizer = LanguageQuantizer(quantizer_config=self.model_config.quantizer, codebook=self.codebook, hidden_dim=self.model_config.hidden_dim)
-        self.encoder = EEIEncoder(self.model_config.bbencoder.embed_dim, self.model_config.hidden_dim)
-        self.decoder = EEIDecoder(resnet_config=self.model_config.resnet)
+        self.decoder = Decoder(resnet_config=self.model_config.resnet)
 
     def config_language_model(self):
         self.bert_config = self.model_config.bert
@@ -38,7 +38,7 @@ class LQAE_model(nn.Module):
     def random_mask(x, ratio):
         random_values = torch.empty(x.shape[:2]).uniform_(0, 1).to(x.device)
         mask = random_values < ratio
-        return mask.to(torch.float32)
+        return mask.to(torch.bool)
 
     @staticmethod
     def random_ratio_mask(x, min_ratio, max_ratio):
@@ -62,6 +62,7 @@ class LQAE_model(nn.Module):
         min_ratio = ratio.get("min_ratio", self.bert_config.bert_min_ratio)
         max_ratio = ratio.get("max_ratio", self.bert_config.bert_max_ratio)
         assert min_ratio <= max_ratio, "min_ratio must be less than max_ratio"
+        
         use_mask = LQAE_model.random_ratio_mask(
             torch.zeros((input_code.shape[0], input_code.shape[1])).to(input_code.device),
             min_ratio,
@@ -95,9 +96,14 @@ class LQAE_model(nn.Module):
             output = output.reshape(input_shape)
 
         logits = bert_output['logits']
+        
+        B, L = logits.shape[:2]
         bert_loss = F.cross_entropy(
-            logits, F.one_hot(input_ids, logits.shape[-1]).float()
-        )
+            logits.reshape(B*L,logits.shape[-1]), 
+            F.one_hot(input_ids, logits.shape[-1]).float().reshape(B*L,logits.shape[-1]),
+            reduction='none'
+        ).reshape(B, L)
+        
         if self.model_config.bert.bert_loss_mask_only:
             bert_loss = bert_loss * use_mask
             bert_loss = torch.sum(bert_loss, axis=1) / torch.sum(use_mask, axis=1)
@@ -111,7 +117,7 @@ class LQAE_model(nn.Module):
         return output, language_model_output
     
     def encode(self, structure):
-        encoded_feature = self.encoder(structure)['feat']
+        encoded_feature = self.encoder(structure)
         quantized, result_dict = self.quantizer(encoded_feature)
         return quantized, result_dict
     
@@ -142,35 +148,6 @@ class LQAE(pl.LightningModule):
         self.lqae_model = LQAE_model(self.model_config)
         self.xyz_converter = XYZConverter()
 
-    def compute_general_FAPE(self, X, Y, atom_mask, Z=3.0, dclamp=10.0, eps=1e-4):
-        N = X.shape[0]
-        """X_x = torch.gather(X, 2, frames[...,0:1].repeat(N,1,1,3))
-        X_y = torch.gather(X, 2, frames[...,1:2].repeat(N,1,1,3))
-        X_z = torch.gather(X, 2, frames[...,2:3].repeat(N,1,1,3))"""
-        X_x = X[..., 0, :]
-        X_y = X[..., 1, :]
-        X_z = X[..., 2, :]
-        uX, tX = rigid_from_3_points(X_x, X_y, X_z)
-
-        """Y_x = torch.gather(Y, 2, frames[...,0:1].repeat(1,1,1,3))
-        Y_y = torch.gather(Y, 2, frames[...,1:2].repeat(1,1,1,3))
-        Y_z = torch.gather(Y, 2, frames[...,2:3].repeat(1,1,1,3))"""
-        Y_x = Y[..., 0, :]
-        Y_y = Y[..., 1, :]
-        Y_z = Y[..., 2, :]
-        uY, tY = rigid_from_3_points(Y_x, Y_y, Y_z)
-        """xij = torch.einsum(
-            'brji,brsj->brsi',
-            uX[:,frame_mask[0]], X[:,atom_mask[0]][:,None,...] - X_y[:,frame_mask[0]][:,:,None,...]
-        )
-        xij_t = torch.einsum('rji,rsj->rsi', uY[frame_mask], Y[atom_mask][None,...] - Y_y[frame_mask][:,None,...])"""
-
-        xij = torch.einsum('brji, brsj->brsi', uX, X - X_y[...,None,:].repeat(1,1,3,1))
-        xij_t = torch.einsum('brji, brsj->brsi', uY, Y - Y_y[...,None,:].repeat(1,1,3,1))
-        diff = torch.sqrt(torch.sum(torch.square(xij - xij_t), dim=-1) + eps)
-        loss = (1.0 / Z) * torch.mean((torch.clamp(diff, max=dclamp)).mean(dim=(1, 2)))
-        return loss
-
     def get_loss(self, result_dict, reconX, nativeX, mask, train=True):
         if "bert_loss" in result_dict:
             bert_loss = result_dict["bert_loss"]
@@ -181,13 +158,14 @@ class LQAE(pl.LightningModule):
         else:
             quantizer_loss = 0.0
         
-        recon_loss = self.compute_general_FAPE(reconX, nativeX, mask)
+        recon_loss, _, _ = calc_str_loss(reconX, nativeX, mask)
         return quantizer_loss, bert_loss, recon_loss
         
     def forward(self, coords):
         return self.lqae_model(coords)
 
     def training_step(self, batch, batch_idx):
+        B = batch['X'].shape[0]
         X, mask = batch['X'], batch['mask']
         output, result_dict = self(X)
 
@@ -203,15 +181,14 @@ class LQAE(pl.LightningModule):
         #total_loss = bert_loss
         #total_loss = recon_loss
         
-        perplexity = total_loss.float().exp().mean()
         total_loss = total_loss.mean()
-        self.log("train_loss", total_loss, sync_dist=True)
-        self.log("train_perplexity", perplexity, prog_bar=True, sync_dist=True)
+        self.log("train_loss", total_loss, sync_dist=True, batch_size=B)
+        #self.log("train_perplexity", perplexity, prog_bar=True, sync_dist=True)
 
         return total_loss
     
     def validation_step(self, batch, batch_idx):
-        #predictions = self.predict_contacts(batch["src_tokens"])
+        B = batch['X'].shape[0]
         with torch.no_grad():
             X, mask = batch['X'], batch['mask']
             output, result_dict = self(X)
@@ -221,8 +198,8 @@ class LQAE(pl.LightningModule):
             total_loss = quantizer_loss + bert_loss + recon_loss
             total_loss = total_loss.mean()
             perplexity = total_loss.float().exp().mean()
-            self.log("validation_loss", total_loss, sync_dist=True)
-            self.log("validation_perplexity", perplexity, sync_dist=True)
+            self.log("validation_loss", total_loss, sync_dist=True, batch_size=B)
+            self.log("validation_perplexity", perplexity, sync_dist=True, batch_size=B)
             return total_loss
 
     def configure_optimizers(self):

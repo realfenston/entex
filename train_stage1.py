@@ -8,7 +8,7 @@ from easydict import EasyDict
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, random_split
 
-from .dataset import StrDataset
+from .dataset import StructureDataset
 from .model import LQAE
 from .util import seed_all
 
@@ -20,8 +20,7 @@ def train(config):
     train_config = config.train
     logger_config = config.logging
     
-    #create and parse dataset
-    all_dataset = StrDataset(dataset_config)
+    all_dataset = StructureDataset(dataset_config)
     train_size = int(dataset_config.train_ratio * len(all_dataset))
     val_size = len(all_dataset) - train_size
     train_dataset, val_dataset = random_split(all_dataset, [train_size, val_size])
@@ -31,7 +30,7 @@ def train(config):
         batch_size=train_config.batch_size,
         shuffle=train_config.shuffle,
         num_workers=train_config.num_workers,
-        collate_fn=StrDataset.featurize
+        collate_fn=StructureDataset.featurize
     )
 
     validation_dataloader = DataLoader(
@@ -39,7 +38,7 @@ def train(config):
         batch_size=train_config.batch_size,
         shuffle=False,
         num_workers=train_config.num_workers,
-        collate_fn=StrDataset.featurize
+        collate_fn=StructureDataset.featurize
     )
 
     model = LQAE(config)
@@ -78,8 +77,8 @@ def train(config):
         resume_from_checkpoint = None if not train_config.resume else train_config.resume_from_checkpoint,
         track_grad_norm=logger_config.track_grad_norm,
         val_check_interval=train_config.val_check_interval,
+        num_sanity_val_steps=train_config.num_sanity_val_steps,
     )
-
     trainer.fit(model, train_dataloader, validation_dataloader)
 
 
