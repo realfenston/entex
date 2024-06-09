@@ -2,37 +2,38 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
-from .loss import calc_str_loss
-from .lr_schedulers import get
-from .module import Decoder, Encoder, LanguageModel, LanguageQuantizer, XYZConverter
+from ..modules.base_modules import XYZConverter
+from ..lr_schedulers import get as lr_get
+from ..modules.module_opt import Decoder, Encoder, LanguageModel, LanguageQuantizer
+from ..utils.loss import calc_str_loss
 
 
 class LQAE_model(nn.Module):
     def __init__(self, model_config):
         super(LQAE_model, self).__init__()
         self.model_config = model_config
-        self.lang_model, self.codebook, self.mask_code, self.tokenizer = self.config_language_model()
-        self.codebook.requires_grad = False
+        self.lang_model, self.codebook, self.tokenizer = self.config_language_model()
 
-        self.encoder = Encoder(self.model_config.bbencoder.encode_dim, self.model_config.hidden_dim)
+        self.encoder = Encoder(self.model_config.backbone.encode_dim, self.model_config.hidden_dim)
         self.quantizer = LanguageQuantizer(quantizer_config=self.model_config.quantizer, codebook=self.codebook, hidden_dim=self.model_config.hidden_dim)
         self.decoder = Decoder(resnet_config=self.model_config.resnet)
 
     def config_language_model(self):
-        self.bert_config = self.model_config.bert
-        if self.bert_config.bert_name == 'allenai/scibert_scivocab_uncased':
-            pretrained_bert = AutoModel.from_pretrained(self.bert_config.bert_path)
+        #self.opt_config = self.model_config.opt
+        opt_config = self.model_config.opt
+        
+        if opt_config.name == 'opt-125M':
+            pretrained_model = AutoModelForCausalLM.from_pretrained(opt_config.model_path)
         else:
-            raise ValueError("Unmatched language model version, please choose among (scibert,)")
-        language_model = LanguageModel(pretrained_bert.config, self.bert_config)
-        codebook = pretrained_bert.embeddings.word_embeddings.weight
-
-        tokenizer = AutoTokenizer.from_pretrained(self.bert_config.bert_path)
-        mask_token_id = tokenizer.convert_tokens_to_ids(tokenizer.mask_token)
-        mask_code = codebook[mask_token_id].detach()
-        return language_model, codebook, mask_code, tokenizer
+            raise ValueError("Unmatched language model version, please choose among (opt-125M, llama2)")
+        codebook = pretrained_model.get_input_embeddings().weight #fix the pretrained model codebook
+        tokenizer = AutoTokenizer.from_pretrained(opt_config.model_path)
+        
+        language_model = LanguageModel(pretrained_model.config, opt_config, codebook, tokenizer)
+        
+        return language_model, codebook, tokenizer
     
     @staticmethod
     def random_mask(x, ratio):
@@ -49,7 +50,6 @@ class LQAE_model(nn.Module):
         self,
         input_code,
         input_ids,
-        ratio={},
         output_hidden_states=False,
     ):
         input_shape = input_code.shape
@@ -59,31 +59,16 @@ class LQAE_model(nn.Module):
             )
             input_ids = torch.reshape(input_ids, (input_ids.shape[0], -1))
 
-        min_ratio = ratio.get("min_ratio", self.bert_config.bert_min_ratio)
-        max_ratio = ratio.get("max_ratio", self.bert_config.bert_max_ratio)
-        assert min_ratio <= max_ratio, "min_ratio must be less than max_ratio"
-        
-        use_mask = LQAE_model.random_ratio_mask(
-            torch.zeros((input_code.shape[0], input_code.shape[1])).to(input_code.device),
-            min_ratio,
-            max_ratio,
-        ).to(input_code.device).to(torch.bool)
-
-        mask_code = self.mask_code.to(input_code.device)
-        input_code = torch.where(
-            use_mask[..., None], mask_code[None, None, ...], input_code
-        )
-
         attention_mask = torch.ones((input_code.shape[0], input_code.shape[1])).to(input_code.device)
-        bert_output = self.lang_model(
+        lm_output = self.lang_model(
             input_code,
             input_ids,
             attention_mask,
             output_hidden_states=output_hidden_states,
         )
 
-        if self.model_config.bert.use_bert_ste:
-            logits = bert_output['logits']
+        if self.model_config.opt.use_opt_ste:
+            logits = lm_output['logits']
             decoding_indices = torch.argmax(logits, axis=-1).to(logits.device)
             codebook_size = self.codebook.shape[0]
             encodings = F.one_hot(decoding_indices, codebook_size)
@@ -92,27 +77,15 @@ class LQAE_model(nn.Module):
             output = softmax_code + (argmax_code - softmax_code).detach()
             output = output.reshape(input_shape)
         else:
-            output = bert_output['last_hidden_states']
+            output = lm_output['last_hidden_states']
             output = output.reshape(input_shape)
-
-        logits = bert_output['logits']
         
-        B, L = logits.shape[:2]
-        bert_loss = F.cross_entropy(
-            logits.reshape(B*L,logits.shape[-1]), 
-            F.one_hot(input_ids, logits.shape[-1]).float().reshape(B*L,logits.shape[-1]),
-            reduction='none'
-        ).reshape(B, L)
+        lm_loss = lm_output['loss'] * self.model_config.opt.opt_autoregressive_loss
         
-        if self.model_config.bert.bert_loss_mask_only:
-            bert_loss = bert_loss * use_mask
-            bert_loss = torch.sum(bert_loss, axis=1) / torch.sum(use_mask, axis=1)
-
-        bert_loss = torch.mean(bert_loss) * self.model_config.bert.bert_mask_loss_weight
         language_model_output = {
-            "bert_logits": bert_output['logits'],
-            "bert_hidden_states": bert_output['hidden_states'],
-            "bert_loss": bert_loss,
+            "lm_logits": lm_output['logits'],
+            "lm_hidden_states": lm_output['hidden_states'],
+            "lm_loss": lm_loss,
         }
         return output, language_model_output
     
@@ -125,39 +98,40 @@ class LQAE_model(nn.Module):
         reconstructed = self.decoder(x)
         return reconstructed
     
-    def forward(self, structure, ratio={}):
+    def forward(self, structure):
         quantized, result_dict = self.encode(structure)
-        bert_quantized, language_model_output = self.languge_model_encode_decode(
-            quantized, result_dict["encoding_indices"], ratio
+        
+        #prepare sequence indices for opt loss
+        lm_quantized, language_model_output = self.languge_model_encode_decode(
+            quantized, result_dict["encoding_indices"]
         )
         result_dict = {**result_dict, **language_model_output}
         structure_output = self.decoder(quantized)
-        bert_channel_structure_output = self.decoder(bert_quantized)
+        lm_channel_structure_output = self.decoder(lm_quantized)
         output = {
             "structure_output": structure_output,
-            "bert_channel_structure_output": bert_channel_structure_output,
+            "lm_channel_structure_output": lm_channel_structure_output,
         }
         return output, result_dict
     
 
 class LQAE(pl.LightningModule):
-    def __init__(self, config=None):
+    def __init__(self, model_config, optimizer_config):
         super(LQAE, self).__init__()
-        self.model_config = config.model
-        self.optimizer_config = config.optimizer
+        self.model_config = model_config
+        self.optimizer_config = optimizer_config
         self.lqae_model = LQAE_model(self.model_config)
         self.xyz_converter = XYZConverter()
 
     def get_loss(self, result_dict, reconX, nativeX, mask, train=True):
-        if "bert_loss" in result_dict:
-            bert_loss = result_dict["bert_loss"]
+        if "lm_loss" in result_dict:
+            bert_loss = result_dict["lm_loss"]
         else:
             bert_loss = 0.0
         if train:
             quantizer_loss = result_dict["quantizer_loss"]
         else:
             quantizer_loss = 0.0
-        
         recon_loss, _, _ = calc_str_loss(reconX, nativeX, mask)
         return quantizer_loss, bert_loss, recon_loss
         
@@ -198,8 +172,8 @@ class LQAE(pl.LightningModule):
             total_loss = quantizer_loss + bert_loss + recon_loss
             total_loss = total_loss.mean()
             perplexity = total_loss.float().exp().mean()
-            self.log("validation_loss", total_loss, sync_dist=True, batch_size=B)
-            self.log("validation_perplexity", perplexity, sync_dist=True, batch_size=B)
+            self.log("valid_loss", total_loss, sync_dist=True, batch_size=B)
+            self.log("valid_perplexity", perplexity, sync_dist=True, batch_size=B)
             return total_loss
 
     def configure_optimizers(self):
@@ -214,10 +188,7 @@ class LQAE(pl.LightningModule):
                 decay_params.append(param)
 
         optimizer_grouped_parameters = [
-            {
-                "params": decay_params,
-                "weight_decay": self.optimizer_config.weight_decay,
-            },
+            {"params": decay_params, "weight_decay": self.optimizer_config.weight_decay},
             {"params": no_decay_params, "weight_decay": 0.0},
         ]
         if self.optimizer_config.name == "adam":
@@ -229,7 +200,7 @@ class LQAE(pl.LightningModule):
             lr=self.optimizer_config.learning_rate,
             betas=self.optimizer_config.adam_betas,
         )
-        scheduler = get(self.optimizer_config.lr_scheduler)(
+        scheduler = lr_get(self.optimizer_config.lr_scheduler)(
             optimizer,
             self.optimizer_config.warmup_steps,
             self.optimizer_config.max_steps,

@@ -6,11 +6,12 @@ import yaml
 import pytorch_lightning as pl
 from easydict import EasyDict
 from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from torch.utils.data import DataLoader, random_split
 
 from .dataset import StructureDataset
-from .model import LQAE
-from .util import seed_all
+from .models.model_opt import LQAE
+from .utils.util import seed_all
 
 
 def train(config):
@@ -41,7 +42,7 @@ def train(config):
         collate_fn=StructureDataset.featurize
     )
 
-    model = LQAE(config)
+    model = LQAE(config.model, config.optimizer)
     
     logger = (
         pl.loggers.WandbLogger(project=config.logging.wandb_project)
@@ -50,8 +51,11 @@ def train(config):
     )
 
     logging.info(f"Using LQAE model for training")
+    
     lr_logger = pl.callbacks.LearningRateMonitor()
 
+    early_stopping_callback = EarlyStopping(monitor=train_config.stop_monitor, mode='min')
+    
     checkpoint_callback = ModelCheckpoint(
         dirpath=config.train.save_path,
         mode='min',
@@ -90,8 +94,8 @@ def get_args():
 
 
 if __name__ == '__main__':
-    os.environ['WANDB_MODE'] = 'disabled'
-    os.environ['WANDB_DIR'] = './wandb/'
+    #os.environ['WANDB_MODE'] = 'dryrun'
+    #os.environ['WANDB_DIR'] = 'wandb/optexp1'
     
     args = get_args()
     with open(args.config_path, 'r') as f:

@@ -1,6 +1,6 @@
 import torch
 
-from .util import get_t, rigid_from_3_points
+from ..utils.util import get_t, rigid_from_3_points
 
 
 def compute_general_FAPE(self, X, Y, atom_mask, Z=3.0, dclamp=10.0, eps=1e-4):

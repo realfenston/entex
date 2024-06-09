@@ -3,10 +3,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from esm.inverse_folding.util import CoordBatchConverter
-from transformers import AutoModel, AutoTokenizer
+from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from .auxiliary_modules import FeedForwardNetwork
-from .util import entropy_loss_fn
+from ..utils.util import entropy_loss_fn
 
 
 class Encoder(nn.Module):
@@ -112,7 +112,6 @@ class LanguageQuantizer(nn.Module):
         super(LanguageQuantizer, self).__init__()
         self.quantizer_config = quantizer_config
         self.codebook = codebook
-        self.codebook.requires_grad = False
         self.input_to_latent = nn.Linear(hidden_dim, quantizer_config.quantizer_hidden_dim)
         self.code_to_latent = nn.Linear(self.quantizer_config.quantizer_latent_dim, quantizer_config.quantizer_hidden_dim)
         
@@ -139,7 +138,8 @@ class LanguageQuantizer(nn.Module):
             x, axis=axis, use_l2_normalize=self.quantizer_config.l2_normalize
         )
 
-        codebook_size = self.codebook.shape[0]
+        codebook = self.codebook.detach()
+        codebook_size = codebook.shape[0]
         if self.quantizer_config.strawman_codebook:
             strawman_codebook = self.param(
                 "strawman_codebook",
@@ -158,8 +158,10 @@ class LanguageQuantizer(nn.Module):
             )
         else:
             latent_input = self.input_to_latent(torch.reshape(x, (-1, x.shape[-1])))
+            
+            #TODO axis=1 or axi=-1?
             latent_input = l2_normalize(latent_input, axis=-1)
-            latent_codebook = self.code_to_latent(self.codebook)
+            latent_codebook = self.code_to_latent(codebook)
             latent_codebook = l2_normalize(latent_codebook, axis=1)
             sg_latent_codebook = latent_codebook.detach()
 
@@ -193,7 +195,7 @@ class LanguageQuantizer(nn.Module):
                 for k, v in result_dict.items():
                     result_dict[k] = v + strawman_result_dict[k]
             else:
-                latent_quantized = self.code_to_latent(quantized)
+                latent_quantized = self.code_to_latent(quantized) #linear layer
                 latent_result_dict = self.get_train_loss(
                     latent_quantized, self.input_to_latent(x), distances
                 )
@@ -222,7 +224,8 @@ class LanguageQuantizer(nn.Module):
         return quantized, result_dict
 
     def quantize(self, z):
-        return torch.matmul(z, self.codebook)
+        codebook = self.codebook.detach()
+        return torch.matmul(z, codebook)
 
     def get_codebook(self):
         return self.codebook
@@ -287,15 +290,14 @@ class LanguageQuantizer(nn.Module):
     
 
 class Add_Pos(nn.Module):
-    def __init__(self, bert_config):
+    def __init__(self, config):
         super(Add_Pos, self).__init__()
-        self.bert_config = bert_config
         self.position_embeddings = nn.Embedding(
-            self.bert_config.max_position_embeddings,
-            self.bert_config.hidden_dim,
+            config.max_position_embeddings,
+            config.hidden_dim,
         )
-        self.layer_norm = nn.LayerNorm(self.bert_config.hidden_dim)
-        self.dropout = nn.Dropout(self.bert_config.hidden_dropout_prob)
+        self.layer_norm = nn.LayerNorm(config.hidden_dim)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
         self.init_weights()
     
     def init_weights(self):
@@ -313,18 +315,15 @@ class Add_Pos(nn.Module):
     
 
 class LanguageModel(nn.Module):
-    def __init__(self, pretrained_config, bert_config):
+    def __init__(self, pretrained_config, config, pretrained_codebook, pretrained_tokenizer):
         super(LanguageModel, self).__init__()
+        self.embeddings = Add_Pos(config)
+        self.model = AutoModelForCausalLM.from_pretrained(config.model_path)
+        self.tokenizer = pretrained_tokenizer
+        self.word_embeddings = pretrained_codebook
         self.pretrained_config = pretrained_config
-        self.bert_config = bert_config
-        self.bert_name = self.bert_config.bert_name
-        self.embeddings = Add_Pos(self.bert_config)
-        self.encoder = AutoModel.from_pretrained(self.bert_config.bert_path)
-        self.tokenizer = AutoTokenizer.from_pretrained(self.bert_config.bert_path)
-        self.word_embeddings = self.encoder.embeddings.word_embeddings.weight
-        self.word_embeddings.requires_grad = False
 
-        for param in self.encoder.parameters():
+        for param in self.model.parameters():
             param.requires_grad = False
 
     def forward(
@@ -354,31 +353,29 @@ class LanguageModel(nn.Module):
         hidden_states = self.embeddings(hidden_states, token_type_ids, position_ids)
         attention_mask = attention_mask.to(hidden_states.device)
 
-        outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            attention_mask=attention_mask,
-            head_mask=head_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        """CausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )"""
+        
+        outputs = self.model(input_ids, attention_mask=attention_mask, labels=input_ids)
 
-        hidden_states = outputs[0]
-        if self.pretrained_config.tie_word_embeddings:
-            shared_embedding = self.word_embeddings.to(hidden_states.device)
-        else:
-            shared_embedding = None
+        loss = outputs.loss
+        logits = outputs.logits
+        hidden_states = outputs.hidden_states
 
         #Compute the prediction scores
         #logits = self.lm_head(hidden_states, shared_embedding=shared_embedding)
-        logits = torch.matmul(hidden_states, shared_embedding.T)
+        #logits = torch.matmul(hidden_states, shared_embedding.T)
 
         if not return_dict:
             return logits, outputs[1:]
 
         return {
+            "loss": loss,
             "logits": logits,
             "hidden_states": outputs.hidden_states,
             "attentions": outputs.attentions,
@@ -390,21 +387,3 @@ class LanguageModel(nn.Module):
         mask = input_ids.ne(pad_token_id)
         position_ids = torch.cumsum(mask, dim=1) * mask
         return position_ids.long()
-    
-
-class XYZConverter(nn.Module):
-    def __init__(self):
-        super(XYZConverter, self).__init__()
-        self.basexyzs = torch.tensor([(-0.5272, 1.3593, 0.000, 1),
-                                      (0.000, 0.000, 0.000, 1),
-                                      (1.5233, 0.000, 0.000, 1)])
-
-    def compute_all_atom(self, Rs, Ts):
-        B, L = Rs.shape[:2]
-        RTF0 = torch.eye(4).repeat(B, L, 1, 1).to(device=Rs.device)
-        RTF0[:,:,:3,:3] = Rs
-        RTF0[:,:,:3,3] = Ts.squeeze(2)
-        #RTframes = torch.stack((RTF0), dim=2)
-        basexyzs = self.basexyzs[None, None, ...].repeat(B, L, 1, 1).to(Rs.device)
-        xyzs = torch.einsum('brij,brmj->brmi', RTF0, basexyzs)
-        return RTF0, xyzs[...,:3]

@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from .common import ESM_TOKENIZER
+from .utils.common import ESM_TOKENIZER
 
 
 class StructureDataset(Dataset):
@@ -29,6 +29,8 @@ class StructureDataset(Dataset):
         return len(self.samples)
     
     @staticmethod
+    #scibert max_seq_length=512
+    #llama support max sequence 4096
     def featurize(batch, max_seq_length=512):
         B = len(batch)
         L_max = max([len(b['seq']) for b in batch])
@@ -48,7 +50,7 @@ class StructureDataset(Dataset):
         numbers = np.sum(mask, axis=1).astype(np.int32)
 
         S_new = np.zeros_like(S)
-        X_new = np.zeros_like(X)+np.nan
+        X_new = np.zeros_like(X) + np.nan
         for i, n in enumerate(numbers):
             X_new[i,:n,::] = X[i][mask[i]==1]
             S_new[i,:n] = S[i][mask[i]==1]

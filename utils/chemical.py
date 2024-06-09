@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from .scoring import *
+from ..scoring import *
 
 
 # ideal N, CA, C initial coordinates

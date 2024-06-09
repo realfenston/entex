@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from scipy.spatial.transform import Rotation
 
 from .chemical import *
-from .scoring import *
+from ..scoring import *
 
 
 def random_rot_trans(xyz, random_noise=20.0):
