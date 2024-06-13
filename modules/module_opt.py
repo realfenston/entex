@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from esm.inverse_folding.util import CoordBatchConverter
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM
 
 from .auxiliary_modules import FeedForwardNetwork
 from ..utils.util import entropy_loss_fn
@@ -16,7 +16,7 @@ class Encoder(nn.Module):
         for param in self.model.parameters():
             param.requires_grad = False
         
-        #manually mock a trainable encoder, while freezing params in the original ESM encoder for memory issue
+        #manually mock a trainable encoder, while freezing params in the original ESM-IF encoder;
         self.fc = nn.Linear(encode_dim, hidden_dim)
         self.activation = nn.GELU()
         self.dropout = nn.Dropout(p_drop)
@@ -35,9 +35,9 @@ class Encoder(nn.Module):
         x = torch.tensor(feat)
         x = self.fc(x)
         x = self.activation(x)
-        x = self.dropout(x)
+        x = self.ffn(x)
         x = self.norm(x)
-        x = self.norm(self.ffn(x))
+        x = self.dropout(x)
         return x
 
 
@@ -69,9 +69,10 @@ class Decoder(nn.Module):
             ])
         self.head = nn.Linear(self.resnet_config.hidden_size, self.resnet_config.output_dim)
         self.sc_predictor = nn.Linear(self.resnet_config.hidden_size, 1)
-        # self.norm_fn = get_norm_layer(train=train, dtype=self.dtype, norm_type=self.norm_type)
 
     def forward(self, encodings):
+        
+        import ipdb; ipdb.set_trace()
         B, L = encodings.shape[0], encodings.shape[1]
         x = encodings
         for layer in self.layers:
@@ -87,19 +88,19 @@ class Decoder(nn.Module):
         T = logits[:,:,0,:] / 10
         R = logits[:,:,1,:] / 100.0
 
-        Qnorm = torch.sqrt(1 + torch.sum(R*R, dim=-1))
-        qA, qB, qC, qD = 1/Qnorm, R[:,:,0]/Qnorm, R[:,:,1]/Qnorm, R[:,:,2]/Qnorm
+        Qnorm = torch.sqrt(1 + torch.sum(R * R, dim=-1))
+        qA, qB, qC, qD = 1 / Qnorm, R[:,:,0] / Qnorm, R[:,:,1] / Qnorm, R[:,:,2] / Qnorm
 
         Rout = torch.zeros((B, L, 3, 3)).to(R.device)
-        Rout[:,:,0,0] = qA*qA+qB*qB-qC*qC-qD*qD
-        Rout[:,:,0,1] = 2*qB*qC - 2*qA*qD
-        Rout[:,:,0,2] = 2*qB*qD + 2*qA*qC
-        Rout[:,:,1,0] = 2*qB*qC + 2*qA*qD
-        Rout[:,:,1,1] = qA*qA-qB*qB+qC*qC-qD*qD
-        Rout[:,:,1,2] = 2*qC*qD - 2*qA*qB
-        Rout[:,:,2,0] = 2*qB*qD - 2*qA*qC
-        Rout[:,:,2,1] = 2*qC*qD + 2*qA*qB
-        Rout[:,:,2,2] = qA*qA-qB*qB-qC*qC+qD*qD
+        Rout[:,:,0,0] = qA * qA + qB * qB - qC * qC - qD * qD
+        Rout[:,:,0,1] = 2 * qB * qC - 2 * qA * qD
+        Rout[:,:,0,2] = 2 * qB * qD + 2 * qA * qC
+        Rout[:,:,1,0] = 2 * qB * qC + 2 * qA * qD
+        Rout[:,:,1,1] = qA * qA - qB * qB + qC * qC - qD * qD
+        Rout[:,:,1,2] = 2 * qC * qD - 2 * qA * qB
+        Rout[:,:,2,0] = 2 * qB * qD - 2 * qA * qC
+        Rout[:,:,2,1] = 2 * qC * qD + 2 * qA * qB
+        Rout[:,:,2,2] = qA * qA - qB * qB - qC * qC + qD * qD
 
         Tout = T.unsqueeze(2)
         alpha = self.sc_predictor(encodings)
@@ -115,6 +116,8 @@ class LanguageQuantizer(nn.Module):
         self.input_to_latent = nn.Linear(hidden_dim, quantizer_config.quantizer_hidden_dim)
         self.code_to_latent = nn.Linear(self.quantizer_config.quantizer_latent_dim, quantizer_config.quantizer_hidden_dim)
         
+    #we discard layer norm as we're having multiple hidden dimensions in this class def;
+    #we use l2_normalize instead which is not dependent on the size of hidden dimension;
     @staticmethod
     def normalize_func(x, axis=None, eps=1e-6, use_l2_normalize=True):
         if use_l2_normalize:
@@ -133,76 +136,37 @@ class LanguageQuantizer(nn.Module):
         d = a2 - 2 * ab + b2
         return d
 
-    def forward(self, x, train=True):
+    def forward(self, x):
         l2_normalize = lambda x, axis=1: LanguageQuantizer.normalize_func(
             x, axis=axis, use_l2_normalize=self.quantizer_config.l2_normalize
         )
 
+        import ipdb; ipdb.set_trace()
         codebook = self.codebook.detach()
         codebook_size = codebook.shape[0]
-        if self.quantizer_config.strawman_codebook:
-            strawman_codebook = self.param(
-                "strawman_codebook",
-                torch.nn.init.normal_(torch.empty((codebook_size, self.quantizer_config.quantizer_latent_dim)), mean=0.02),
-            )
-            # strawman_codebook = torch.tensor(strawman_codebook, dtype=self.dtype)
-            latent_input = self.input_to_latent(x.reshape((-1, x.shape[-1])))
-            latent_input = l2_normalize(latent_input, axis=1)
-            sg_strawman_codebook = (
-                l2_normalize(strawman_codebook, axis=1).detach()
-            )
-            distances = torch.reshape(
-                LanguageQuantizer.squared_euclidean_distance(latent_input, sg_strawman_codebook,
-                dot_product=self.quantizer_config.dot_product),
-                x.shape[:-1] + (codebook_size,),
-            )
-        else:
-            latent_input = self.input_to_latent(torch.reshape(x, (-1, x.shape[-1])))
-            
-            #TODO axis=1 or axi=-1?
-            latent_input = l2_normalize(latent_input, axis=-1)
-            latent_codebook = self.code_to_latent(codebook)
-            latent_codebook = l2_normalize(latent_codebook, axis=1)
-            sg_latent_codebook = latent_codebook.detach()
+        
+        latent_input = self.input_to_latent(torch.reshape(x, (-1, x.shape[-1])))
+        
+        latent_input = l2_normalize(latent_input, axis=-1)
+        latent_codebook = self.code_to_latent(codebook)
+        latent_codebook = l2_normalize(latent_codebook, axis=-1)
+        sg_latent_codebook = latent_codebook.detach()
 
-            distances = torch.reshape(
-                LanguageQuantizer.squared_euclidean_distance(latent_input, sg_latent_codebook,
-                                                            dot_product=self.quantizer_config.dot_product),
-                x.shape[:-1] + (codebook_size,),
-            )
-
-        encoding_indices = torch.topk(distances, k=self.quantizer_config.top_k_value, dim=-1, largest=False)[1]
-
-        encoding_indices, encodings, quantized = self.get_encoding_quantized(
-            encoding_indices, codebook_size
+        distances = torch.reshape(
+            LanguageQuantizer.squared_euclidean_distance(latent_input, sg_latent_codebook, dot_product=self.quantizer_config.dot_product),
+            x.shape[:-1] + (codebook_size,),
         )
 
-        """codebook_usage = torch.sum(encodings, axis=(0, 1)) > 0
-        codebook_usage = torch.sum(codebook_usage).to(torch.float32) / codebook_size
-        if self.quantizer_config.top_k_avg:
-            codebook_usage = codebook_usage / self.config.top_k_value"""
-        result_dict = dict()
-        if train:
-            #used in original paper, but quantized and x have a shape mismatch
-            #please ensure hidden dim == codebook dim here
-            result_dict = self.get_train_loss(quantized, x, distances) 
-
-            if self.quantizer_config.strawman_codebook:
-                strawman_quantized = self.quantize_strawman(encodings)
-                strawman_result_dict = self.get_train_loss(
-                    strawman_quantized, self.input_to_latent(x), distances
-                )
-                for k, v in result_dict.items():
-                    result_dict[k] = v + strawman_result_dict[k]
-            else:
-                latent_quantized = self.code_to_latent(quantized) #linear layer
-                latent_result_dict = self.get_train_loss(
-                    latent_quantized, self.input_to_latent(x), distances
-                )
-                for k, v in result_dict.items():
-                    result_dict[k] = v + latent_result_dict[k]
-
-            quantized = x + (quantized - x).detach()
+        encoding_indices = torch.topk(distances, k=self.quantizer_config.top_k_value, dim=-1, largest=False)[1]
+        encoding_indices, encodings, quantized = self.get_encoding_quantized(encoding_indices, codebook_size)
+            
+        #used in original paper, but quantized and x have a shape mismatch
+        #please ensure hidden dim == codebook dim here
+        latent_quantized = self.code_to_latent(quantized) #linear layer
+        latent_input = self.input_to_latent(x)
+        result_dict = self.get_train_loss(latent_quantized, latent_input, distances)
+            
+        quantized = x + (quantized - x).detach()
 
         avg_probs = torch.mean(encodings.reshape(-1, encodings.shape[-1]), axis=0)
         log_perplexity = -torch.sum(avg_probs * torch.log(avg_probs + 1e-6))

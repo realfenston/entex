@@ -20,17 +20,27 @@ class LQAE_model(nn.Module):
         self.decoder = Decoder(resnet_config=self.model_config.resnet)
 
     def config_language_model(self):
-        #self.opt_config = self.model_config.opt
-        opt_config = self.model_config.opt
-        if opt_config.name == 'opt-125M':
-            pretrained_model = AutoModelForCausalLM.from_pretrained(opt_config.model_path)
+        llama2_config = self.model_config.llama2
+        if llama2_config.name == 'llama2':
+            pretrained_model = AutoModelForCausalLM.from_pretrained(llama2_config.model_path)
         else:
             raise ValueError("Unmatched language model version, please choose among (opt-125M, llama2)")
         codebook = pretrained_model.get_input_embeddings().weight #fix the pretrained model codebook
-        tokenizer = AutoTokenizer.from_pretrained(opt_config.model_path)
+        tokenizer = AutoTokenizer.from_pretrained(llama2_config.model_path)
         
-        language_model = LanguageModel(pretrained_model.config, opt_config, codebook, tokenizer)
+        language_model = LanguageModel(pretrained_model.config, llama2_config, codebook, tokenizer)
         return language_model, codebook, tokenizer
+    
+    @staticmethod
+    def random_mask(x, ratio):
+        random_values = torch.empty(x.shape[:2]).uniform_(0, 1).to(x.device)
+        mask = random_values < ratio
+        return mask.to(torch.bool)
+
+    @staticmethod
+    def random_ratio_mask(x, min_ratio, max_ratio):
+        ratio = torch.empty(x.shape[:2]).uniform_(min_ratio, max_ratio).to(x.device)
+        return LQAE_model.random_mask(x, ratio)
     
     def languge_model_encode_decode(
         self,
@@ -66,7 +76,7 @@ class LQAE_model(nn.Module):
             output = lm_output['last_hidden_states']
             output = output.reshape(input_shape)
         
-        lm_loss = lm_output['loss'] * self.model_config.opt.ar_loss_weight
+        lm_loss = lm_output['loss'] * self.model_config.opt.opt_autoregressive_loss
         
         language_model_output = {
             "lm_logits": lm_output['logits'],
@@ -85,8 +95,6 @@ class LQAE_model(nn.Module):
         return reconstructed
     
     def forward(self, structure):
-        
-        import ipdb; ipdb.set_trace()
         quantized, result_dict = self.encode(structure)
         
         #prepare sequence indices for opt loss
@@ -129,9 +137,6 @@ class LQAE(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         B = batch['X'].shape[0]
         X, mask = batch['X'], batch['mask']
-        
-        #TODO
-        X = X[:, :1, ...]
         output, result_dict = self(X)
 
         Rs, Ts, alphas = output['structure_output'] #alphas, or the torsion angles, are not required for backbone generation
@@ -139,9 +144,13 @@ class LQAE(pl.LightningModule):
         #fape_loss = self.compute_general_FAPE(xyz, X, mask)
         #quantizer_loss, e_latent_loss, q_latent_loss, entropy_loss = result_dict['quantizer_loss'], result_dict['e_latent_loss'], result_dict['q_latent_loss'], result_dict['entropy_loss']
 
+        #total_loss = fape_loss + quantizer_loss + e_latent_loss + q_latent_loss + entropy_loss
         quantizer_loss, bert_loss, recon_loss = self.get_loss(result_dict, xyz, X, mask)
         total_loss = quantizer_loss + bert_loss + recon_loss
-
+        #total_loss = quantizer_loss
+        #total_loss = bert_loss
+        #total_loss = recon_loss
+        
         total_loss = total_loss.mean()
         self.log("quantizer_loss", quantizer_loss, sync_dist=True, batch_size=B)
         self.log("bert_loss", bert_loss, sync_dist=True, batch_size=B)

@@ -10,54 +10,58 @@ from pytorch_lightning.callbacks.early_stopping import EarlyStopping
 from torch.utils.data import DataLoader, random_split
 
 from .dataset import StructureDataset
-from .models.model_opt import LQAE
+#from .models.model_llama2 import LQAE as LqaeLlama2
+from .models.model_opt import LQAE as LqaeOpt
 from .utils.util import seed_all
 
 
 def train(config):
     seed_all(config.seed)
     
-    dataset_config = config.dataset
     train_config = config.train
     logger_config = config.logging
     
-    all_dataset = StructureDataset(dataset_config)
-    train_size = int(dataset_config.train_ratio * len(all_dataset))
-    val_size = len(all_dataset) - train_size
-    train_dataset, val_dataset = random_split(all_dataset, [train_size, val_size])
+    print('#'*28, f'loading LQAE model with following specifications: {config.model}')
+    model = LqaeOpt(config.model, config.optimizer)
+    
+    dataset_config = config.dataset
+    dataset = StructureDataset(dataset_config)
+    
+    train_size = int(dataset_config.train_ratio * len(dataset))
+    val_size = len(dataset) - train_size
+    train_set, valid_set = random_split(dataset, [train_size, val_size])
 
-    train_dataloader = DataLoader(
-        train_dataset,
+    train_loader = DataLoader(
+        train_set,
         batch_size=train_config.batch_size,
+        num_workers=train_config.num_workers,
+        collate_fn=StructureDataset.featurize,
         shuffle=train_config.shuffle,
-        num_workers=train_config.num_workers,
-        collate_fn=StructureDataset.featurize
+        drop_last=True,
     )
 
-    validation_dataloader = DataLoader(
-        val_dataset,
+    valid_loader = DataLoader(
+        valid_set,
         batch_size=train_config.batch_size,
-        shuffle=False,
         num_workers=train_config.num_workers,
-        collate_fn=StructureDataset.featurize
+        collate_fn=StructureDataset.featurize,
+        shuffle=False,
+        drop_last=True,
     )
-
-    model = LQAE(config.model, config.optimizer)
     
     logger = (
-        pl.loggers.WandbLogger(project=config.logging.wandb_project)
+        pl.loggers.WandbLogger(project=''.join(config.logging.wandb_project))
         if config.logging.wandb_project is not None
         else True
     )
 
-    logging.info(f"Using LQAE model for training")
-    
+    logging.info(f"Using LQAE model for training")    
     lr_logger = pl.callbacks.LearningRateMonitor()
 
-    early_stopping_callback = EarlyStopping(monitor=train_config.stop_monitor, mode='min')
+    #early_stopping_callback = EarlyStopping(monitor=train_config.stop_monitor, mode='min')
     
     checkpoint_callback = ModelCheckpoint(
-        dirpath=config.train.save_path,
+        dirpath=''.join(config.train.save_path),
         mode='min',
         monitor=train_config.save_monitor,
         save_top_k=train_config.save_top_k,
@@ -78,17 +82,17 @@ def train(config):
         max_epochs=train_config.epochs,
         num_nodes=train_config.num_nodes,
         precision=train_config.precision,
-        resume_from_checkpoint = None if not train_config.resume else train_config.resume_from_checkpoint,
+        resume_from_checkpoint = None if not train_config.resume else ''.join(train_config.resume_from_checkpoint),
         track_grad_norm=logger_config.track_grad_norm,
         val_check_interval=train_config.val_check_interval,
         num_sanity_val_steps=train_config.num_sanity_val_steps,
     )
-    trainer.fit(model, train_dataloader, validation_dataloader)
+    trainer.fit(model, train_loader, valid_loader)
 
 
 def get_args():
     parser = argparse.ArgumentParser(description="EnTex project training script")
-    parser.add_argument("--config_path", default='./entex/configs/entex_test.yml', help="path to load yaml-like configurations")
+    parser.add_argument("--config_path", default='./entex/configs/test.yml', help="path to load yaml-like configurations")
     args = parser.parse_args()
     return args
 
