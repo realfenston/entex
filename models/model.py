@@ -6,7 +6,8 @@ from transformers import AutoModel, AutoTokenizer
 
 from ..utils.loss import calc_str_loss
 from ..lr_schedulers import get
-from ..modules.module import Decoder, Encoder, LanguageModel, LanguageQuantizer, XYZConverter
+from ..modules.decoder_module import AttenionBasedDecoder
+from ..modules.module import Encoder, LanguageModel, LanguageQuantizer, XYZConverter
 
 
 class LQAE_model(nn.Module):
@@ -14,11 +15,10 @@ class LQAE_model(nn.Module):
         super(LQAE_model, self).__init__()
         self.model_config = model_config
         self.lang_model, self.codebook, self.mask_code, self.tokenizer = self.config_language_model()
-        self.codebook.requires_grad = False
 
         self.encoder = Encoder(self.model_config.backbone.encode_dim, self.model_config.hidden_dim)
         self.quantizer = LanguageQuantizer(quantizer_config=self.model_config.quantizer, codebook=self.codebook, hidden_dim=self.model_config.hidden_dim)
-        self.decoder = Decoder(resnet_config=self.model_config.resnet)
+        self.decoder = AttenionBasedDecoder(resnet_config=self.model_config.resnet)
 
     def config_language_model(self):
         self.bert_config = self.model_config.bert
@@ -84,11 +84,12 @@ class LQAE_model(nn.Module):
 
         if self.model_config.bert.use_bert_ste:
             logits = bert_output['logits']
+            codebook = self.codebook.detach()
             decoding_indices = torch.argmax(logits, axis=-1).to(logits.device)
-            codebook_size = self.codebook.shape[0]
+            codebook_size = codebook.shape[0]
             encodings = F.one_hot(decoding_indices, codebook_size)
-            argmax_code = torch.matmul(encodings.to(torch.float32), self.codebook)
-            softmax_code = torch.matmul(F.softmax(logits, dim=-1), self.codebook)
+            argmax_code = torch.matmul(encodings.to(torch.float32), codebook)
+            softmax_code = torch.matmul(F.softmax(logits, dim=-1), codebook)
             output = softmax_code + (argmax_code - softmax_code).detach()
             output = output.reshape(input_shape)
         else:

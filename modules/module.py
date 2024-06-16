@@ -250,7 +250,7 @@ class LanguageQuantizer(nn.Module):
                 )
                 * self.quantizer_config.quantizer_loss_entropy
             )
-        #e_latent_loss = torch.tensor(e_latent_loss).to(e_latent_loss.dev·ice).to(torch.float32)
+
         loss = e_latent_loss + q_latent_loss + entropy_loss
 
         result_dict = dict(
@@ -384,21 +384,3 @@ class LanguageModel(nn.Module):
         mask = input_ids.ne(pad_token_id)
         position_ids = torch.cumsum(mask, dim=1) * mask
         return position_ids.long()
-    
-
-class XYZConverter(nn.Module):
-    def __init__(self):
-        super(XYZConverter, self).__init__()
-        self.basexyzs = torch.tensor([(-0.5272, 1.3593, 0.000, 1),
-                                      (0.000, 0.000, 0.000, 1),
-                                      (1.5233, 0.000, 0.000, 1)])
-
-    def compute_all_atom(self, Rs, Ts):
-        B, L = Rs.shape[:2]
-        RTF0 = torch.eye(4).repeat(B, L, 1, 1).to(device=Rs.device)
-        RTF0[:,:,:3,:3] = Rs
-        RTF0[:,:,:3,3] = Ts.squeeze(2)
-        #RTframes = torch.stack((RTF0), dim=2)
-        basexyzs = self.basexyzs[None, None, ...].repeat(B, L, 1, 1).to(Rs.device)
-        xyzs = torch.einsum('brij,brmj->brmi', RTF0, basexyzs)
-        return RTF0, xyzs[...,:3]

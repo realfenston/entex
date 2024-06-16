@@ -6,7 +6,8 @@ from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
 from ..modules.base_modules import XYZConverter
 from ..lr_schedulers import get as lr_get
-from ..modules.module_opt import Decoder, Encoder, LanguageModel, LanguageQuantizer
+from ..modules.module_opt import Encoder, LanguageModel, LanguageQuantizer
+from ..modules.decoder_module import AttenionBasedDecoder
 from ..utils.loss import calc_str_loss
 
 
@@ -17,7 +18,7 @@ class LQAE_model(nn.Module):
         self.lang_model, self.codebook, self.tokenizer = self.config_language_model()
         self.encoder = Encoder(self.model_config.backbone.encode_dim, self.model_config.hidden_dim)
         self.quantizer = LanguageQuantizer(quantizer_config=self.model_config.quantizer, codebook=self.codebook, hidden_dim=self.model_config.hidden_dim)
-        self.decoder = Decoder(resnet_config=self.model_config.resnet)
+        self.decoder = AttenionBasedDecoder(config=self.model_config.decoder)
 
     def config_language_model(self):
         #self.opt_config = self.model_config.opt
@@ -56,10 +57,11 @@ class LQAE_model(nn.Module):
         if self.model_config.opt.use_opt_ste:
             logits = lm_output['logits']
             decoding_indices = torch.argmax(logits, axis=-1).to(logits.device)
-            codebook_size = self.codebook.shape[0]
+            codebook = self.codebook.detach()
+            codebook_size = codebook.shape[0]
             encodings = F.one_hot(decoding_indices, codebook_size)
-            argmax_code = torch.matmul(encodings.to(torch.float32), self.codebook)
-            softmax_code = torch.matmul(F.softmax(logits, dim=-1), self.codebook)
+            argmax_code = torch.matmul(encodings.to(torch.float32), codebook)
+            softmax_code = torch.matmul(F.softmax(logits, dim=-1), codebook)
             output = softmax_code + (argmax_code - softmax_code).detach()
             output = output.reshape(input_shape)
         else:
@@ -85,8 +87,6 @@ class LQAE_model(nn.Module):
         return reconstructed
     
     def forward(self, structure):
-        
-        import ipdb; ipdb.set_trace()
         quantized, result_dict = self.encode(structure)
         
         #prepare sequence indices for opt loss
@@ -131,10 +131,10 @@ class LQAE(pl.LightningModule):
         X, mask = batch['X'], batch['mask']
         
         #TODO
-        X = X[:, :1, ...]
+        #X = X[:, :1, ...]
         output, result_dict = self(X)
 
-        Rs, Ts, alphas = output['structure_output'] #alphas, or the torsion angles, are not required for backbone generation
+        Rs, Ts = output['structure_output'] #alphas, or the torsion angles, are not required for backbone generation
         _, xyz = self.xyz_converter.compute_all_atom(Rs, Ts)
         #fape_loss = self.compute_general_FAPE(xyz, X, mask)
         #quantizer_loss, e_latent_loss, q_latent_loss, entropy_loss = result_dict['quantizer_loss'], result_dict['e_latent_loss'], result_dict['q_latent_loss'], result_dict['entropy_loss']

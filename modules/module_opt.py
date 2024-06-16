@@ -31,81 +31,14 @@ class Encoder(nn.Module):
         )
         encoder_out = self.model.encoder(batch_coords, padding_mask, confidence)
         
-        feat = encoder_out['encoder_out'][0].permute(1, 0, 2)[:,1:-1] # this is due to esm legacy issue
-        x = torch.tensor(feat)
+        x = encoder_out['encoder_out'][0].permute(1, 0, 2)[:,1:-1] # this is due to esm legacy issue
+        x = torch.tensor(x)
         x = self.fc(x)
         x = self.activation(x)
         x = self.ffn(x)
         x = self.norm(x)
         x = self.dropout(x)
         return x
-
-
-class CNNLayer(nn.Module):
-    def __init__(self, in_channel, out_channel, kernel_size=5, stride=1, padding='same'):
-        super(CNNLayer, self).__init__()
-        self.conv = nn.Conv1d(in_channel, out_channel, kernel_size=kernel_size, stride=stride, padding=padding, bias=False)
-        self.batch_norm = nn.BatchNorm1d(out_channel)
-        self.activation = nn.GELU()
-    
-    def forward(self, encodings):
-        encodings = self.conv(encodings)
-        encodings = self.batch_norm(encodings)
-        encodings = self.activation(encodings)
-        return encodings
-    
-
-class Decoder(nn.Module):
-    def __init__(self, resnet_config):
-        super(Decoder, self).__init__()
-        self.resnet_config = resnet_config
-        self.layer_norm = nn.LayerNorm(self.resnet_config.hidden_dim)
-        self.hidden_channels = [self.resnet_config.hidden_size] + self.resnet_config.channel_multipliers + [self.resnet_config.hidden_size]
-        self.layers = nn.ModuleList()
-
-        for index in range(len(self.hidden_channels)-1):
-            self.layers.extend([
-                CNNLayer(self.hidden_channels[index], self.hidden_channels[index+1])
-            ])
-        self.head = nn.Linear(self.resnet_config.hidden_size, self.resnet_config.output_dim)
-        self.sc_predictor = nn.Linear(self.resnet_config.hidden_size, 1)
-
-    def forward(self, encodings):
-        
-        import ipdb; ipdb.set_trace()
-        B, L = encodings.shape[0], encodings.shape[1]
-        x = encodings
-        for layer in self.layers:
-            encodings = torch.transpose(encodings, 2, 1)
-            #encodings = [B, h, W, H]
-            encodings = layer(encodings)
-            encodings = torch.transpose(encodings, 2, 1)
-        
-        encodings = x + encodings
-        logits = self.head(encodings)
-        logits = logits.reshape(B, L, 2, 3)
-
-        T = logits[:,:,0,:] / 10
-        R = logits[:,:,1,:] / 100.0
-
-        Qnorm = torch.sqrt(1 + torch.sum(R * R, dim=-1))
-        qA, qB, qC, qD = 1 / Qnorm, R[:,:,0] / Qnorm, R[:,:,1] / Qnorm, R[:,:,2] / Qnorm
-
-        Rout = torch.zeros((B, L, 3, 3)).to(R.device)
-        Rout[:,:,0,0] = qA * qA + qB * qB - qC * qC - qD * qD
-        Rout[:,:,0,1] = 2 * qB * qC - 2 * qA * qD
-        Rout[:,:,0,2] = 2 * qB * qD + 2 * qA * qC
-        Rout[:,:,1,0] = 2 * qB * qC + 2 * qA * qD
-        Rout[:,:,1,1] = qA * qA - qB * qB + qC * qC - qD * qD
-        Rout[:,:,1,2] = 2 * qC * qD - 2 * qA * qB
-        Rout[:,:,2,0] = 2 * qB * qD - 2 * qA * qC
-        Rout[:,:,2,1] = 2 * qC * qD + 2 * qA * qB
-        Rout[:,:,2,2] = qA * qA - qB * qB - qC * qC + qD * qD
-
-        Tout = T.unsqueeze(2)
-        alpha = self.sc_predictor(encodings)
-
-        return Rout, Tout, alpha
     
 
 class LanguageQuantizer(nn.Module):
@@ -141,7 +74,6 @@ class LanguageQuantizer(nn.Module):
             x, axis=axis, use_l2_normalize=self.quantizer_config.l2_normalize
         )
 
-        import ipdb; ipdb.set_trace()
         codebook = self.codebook.detach()
         codebook_size = codebook.shape[0]
         
