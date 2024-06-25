@@ -1,13 +1,13 @@
 seed: 42
-base_name: &base_name test2
+base_name: &base_name reconstruct
 hidden_dim: &hidden_dim 768
 
 dataset:
-  path: data/entex_toy.jsonl
+  path: data/entex_median.jsonl
   train_ratio: 0.8
 
 train:
-  batch_size: 1
+  batch_size: 4
   epochs: 100
   model_type: lqae
   accumulate_grad_batches: 2
@@ -17,7 +17,7 @@ train:
   gpu_device: [4,5,6,7]
   num_nodes: 1
   precision: 32
-  shuffle: false
+  shuffle: true
   strategy: ddp
   gradient_clip_val: 5.0
   fast_dev_run: false
@@ -64,16 +64,17 @@ model:
     quantizer_loss_entropy: 0.0
     entropy_temperature: 0.01
     entropy_loss_type: softmax
-    quantizer_loss_commitment: 1.0
+    quantizer_loss_commitment: 0.0
     l2_normalize: true
     top_k_value: 1
     top_k_avg: false
     top_k_rnd: false
+    gumbel_softmax: false
     quantizer_latent_dim: 768 #dim for codebook
     strawman_codebook: false
     strawman_codebook_init: normal:1.0
     quantizer_loss_perplexity: 0.0
-    dot_product: true
+    dot_product: false
     quantizer_hidden_dim: 512 #dim for hidden space
   backbone:
     encode_dim: 512
@@ -84,7 +85,7 @@ model:
     hidden_dim: 768
     hidden_dropout_prob: 0.1
     use_opt_ste: True
-    ar_loss_weight: 0.25
+    ar_loss_weight: 0.0
   decoder:
     num_layers: 3
     head_dim: *hidden_dim

@@ -62,14 +62,14 @@ class AttenionBasedDecoder(nn.Module):
     def __init__(self, config):
         super(AttenionBasedDecoder, self).__init__()
 
-        self.layers = nn.ModuleList()
+        self.decoder_layers = nn.ModuleList()
         for _ in range(config.num_layers):
-            self.layers.extend([self.build_attention_block(config.head_dim, config.num_heads, config.p_drop)])
+            self.decoder_layers.extend([self.build_attn_block(config.head_dim, config.num_heads, config.p_drop)])
 
-        self.rota_trans_head = nn.Linear(config.hidden_dim, config.output_dim)
+        self.rot_tran_head = nn.Linear(config.hidden_dim, config.output_dim)
         #self.sc_predictor = nn.Linear(self.resnet_config.hidden_size, 1) #predict alpha torsion angles
         
-    def build_attention_block(self, embed_dim, num_heads, p_drop, add_bias_kv=False, add_zero_attn=False):
+    def build_attn_block(self, embed_dim, num_heads, p_drop, add_bias_kv=False, add_zero_attn=False):
         return nn.MultiheadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
@@ -77,22 +77,21 @@ class AttenionBasedDecoder(nn.Module):
             bias=True,
             add_bias_kv=add_bias_kv,
             add_zero_attn=add_zero_attn,
+            batch_first=True,
         )
 
-    def forward(self, hidden_state):
+    def forward(self, hidden_state, attn_mask=None):
         B, L = hidden_state.shape[:2]
         
-        res = hidden_state
-        for layer in self.layers:
-            hidden_state, _ = layer(hidden_state, hidden_state, hidden_state) #q,k,v
-        
-        hidden_state = res + hidden_state
-        logits = self.rota_trans_head(hidden_state)
+        for layer in self.decoder_layers:
+            hidden_state, _ = layer(query=hidden_state, key=hidden_state, value=hidden_state)
+
+        logits = self.rot_tran_head(hidden_state)
         logits = logits.reshape(B, L, 2, 3)
 
         Ts = logits[:,:,0,:] * 10.0
         Qs = logits[:,:,1,:] #quartenions
-        Qs = torch.cat((torch.ones((B, L, 1),device=Qs.device), Qs), dim=-1)
+        Qs = torch.cat((torch.ones((B, L, 1), device=Qs.device), Qs), dim=-1)
         Qs = normQs(Qs)
         Rs = Qs2Rs(Qs)
 

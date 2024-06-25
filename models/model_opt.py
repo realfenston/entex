@@ -2,7 +2,7 @@ import pytorch_lightning as pl
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from ..modules.base_modules import XYZConverter
 from ..lr_schedulers import get as lr_get
@@ -82,11 +82,12 @@ class LQAE_model(nn.Module):
         quantized, result_dict = self.quantizer(encoded_feature)
         return quantized, result_dict
     
-    def decode(self, x):
-        reconstructed = self.decoder(x)
+    def decode(self, x, mask=None):
+        attn_mask = torch.logical_not(mask)
+        reconstructed = self.decoder(x, attn_mask=attn_mask)
         return reconstructed
     
-    def forward(self, structure):
+    def forward(self, structure, mask=None):
         quantized, result_dict = self.encode(structure)
         
         #prepare sequence indices for opt loss
@@ -94,8 +95,8 @@ class LQAE_model(nn.Module):
             quantized, result_dict["encoding_indices"]
         )
         result_dict = {**result_dict, **language_model_output}
-        structure_output = self.decoder(quantized)
-        lm_channel_structure_output = self.decoder(lm_quantized)
+        structure_output = self.decoder(quantized, mask)
+        lm_channel_structure_output = self.decoder(lm_quantized, mask)
         output = {
             "structure_output": structure_output,
             "lm_channel_structure_output": lm_channel_structure_output,
@@ -113,38 +114,34 @@ class LQAE(pl.LightningModule):
 
     def get_loss(self, result_dict, reconX, nativeX, mask, train=True):
         if "lm_loss" in result_dict:
-            bert_loss = result_dict["lm_loss"]
+            lm_loss = result_dict["lm_loss"]
         else:
-            bert_loss = 0.0
-        if train:
-            quantizer_loss = result_dict["quantizer_loss"]
-        else:
-            quantizer_loss = 0.0
+            lm_loss = 0.0
+
+        quantizer_loss = result_dict["quantizer_loss"]
         recon_loss, _, _ = calc_str_loss(reconX, nativeX, mask)
-        return quantizer_loss, bert_loss, recon_loss
+        return quantizer_loss, lm_loss, recon_loss
         
-    def forward(self, coords):
-        return self.lqae_model(coords)
+    def forward(self, coords, mask=None):
+        return self.lqae_model(coords, mask=mask)
 
     def training_step(self, batch, batch_idx):
         B = batch['X'].shape[0]
         X, mask = batch['X'], batch['mask']
         
-        #TODO
-        #X = X[:, :1, ...]
-        output, result_dict = self(X)
-
+        output, result_dict = self(coords=X, mask=mask)
         Rs, Ts = output['structure_output'] #alphas, or the torsion angles, are not required for backbone generation
+        
         _, xyz = self.xyz_converter.compute_all_atom(Rs, Ts)
         #fape_loss = self.compute_general_FAPE(xyz, X, mask)
         #quantizer_loss, e_latent_loss, q_latent_loss, entropy_loss = result_dict['quantizer_loss'], result_dict['e_latent_loss'], result_dict['q_latent_loss'], result_dict['entropy_loss']
 
-        quantizer_loss, bert_loss, recon_loss = self.get_loss(result_dict, xyz, X, mask)
-        total_loss = quantizer_loss + bert_loss + recon_loss
+        quantizer_loss, lm_loss, recon_loss = self.get_loss(result_dict, xyz, X, mask)
+        total_loss = quantizer_loss + lm_loss + recon_loss
 
         total_loss = total_loss.mean()
         self.log("quantizer_loss", quantizer_loss, sync_dist=True, batch_size=B)
-        self.log("bert_loss", bert_loss, sync_dist=True, batch_size=B)
+        self.log("bert_loss", lm_loss, sync_dist=True, batch_size=B)
         self.log("recon_loss", recon_loss, sync_dist=True, batch_size=B)
         self.log("train_loss", total_loss, sync_dist=True, batch_size=B)
         #self.log("train_perplexity", perplexity, prog_bar=True, sync_dist=True)
@@ -155,13 +152,15 @@ class LQAE(pl.LightningModule):
         B = batch['X'].shape[0]
         with torch.no_grad():
             X, mask = batch['X'], batch['mask']
-            output, result_dict = self(X)
-            Rs, Ts, alphas = output['structure_output'] #alphas, or the torsion angles, are not required for backbone generation
+            output, result_dict = self(X, mask=mask)
+            Rs, Ts = output['structure_output']
+            
             _, xyz = self.xyz_converter.compute_all_atom(Rs, Ts)
             quantizer_loss, bert_loss, recon_loss = self.get_loss(result_dict, xyz, X, mask)
             total_loss = quantizer_loss + bert_loss + recon_loss
             total_loss = total_loss.mean()
             perplexity = total_loss.float().exp().mean()
+            
             self.log("valid_loss", total_loss, sync_dist=True, batch_size=B)
             self.log("valid_perplexity", perplexity, sync_dist=True, batch_size=B)
             return total_loss

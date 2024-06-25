@@ -1,5 +1,5 @@
 seed: 42
-base_name: &base_name test1
+base_name: &base_name reconstruct_test
 hidden_dim: &hidden_dim 768
 
 dataset:
@@ -14,9 +14,9 @@ train:
   strategy: ddp
   accelerator: gpu
   cpu_device: 1
-  gpu_device: [4,5,6,7]
+  gpu_device: [1]
   num_nodes: 1
-  precision: 32
+  precision: 16
   shuffle: false
   strategy: ddp
   gradient_clip_val: 5.0
@@ -36,7 +36,7 @@ train:
   save_monitor: valid_loss
   stop_monitor: valid_loss
   save_every_n_step: 1000
-  save_top_k: 1
+  save_top_k: 3
   num_sanity_val_steps: 0
 
 logging:
@@ -64,27 +64,29 @@ model:
     quantizer_loss_entropy: 0.0
     entropy_temperature: 0.01
     entropy_loss_type: softmax
-    quantizer_loss_commitment: 1.0
+    quantizer_loss_commitment: 0.0
     l2_normalize: true
     top_k_value: 1
     top_k_avg: false
     top_k_rnd: false
+    gumbel_softmax: false
     quantizer_latent_dim: 768 #dim for codebook
     strawman_codebook: false
     strawman_codebook_init: normal:1.0
     quantizer_loss_perplexity: 0.0
-    dot_product: true
+    dot_product: false
     quantizer_hidden_dim: 512 #dim for hidden space
+    quantizer_loss_weight: 0.0
   backbone:
     encode_dim: 512
-  llama2:
-    name: llama2
-    model_path: checkpoint/llama2
+  opt:
+    name: opt-125M
+    model_path: checkpoint/opt-125M
     max_position_embeddings: 1024
     hidden_dim: 768
     hidden_dropout_prob: 0.1
     use_opt_ste: True
-    ar_loss_weight: 0.25
+    ar_loss_weight: 0.0
   decoder:
     num_layers: 3
     head_dim: *hidden_dim
@@ -95,9 +97,9 @@ model:
 
 optimizer:
   name: adam
-  learning_rate: 0.001
+  learning_rate: 0.0001
   weight_decay: 0.0001
-  warmup_steps: 1000
+  warmup_steps: 10000
   adam_betas: [0.9, 0.999]
   max_steps: 100000
   lr_scheduler: warmup_linear

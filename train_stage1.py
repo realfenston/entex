@@ -21,7 +21,6 @@ def train(config):
     train_config = config.train
     logger_config = config.logging
     
-    print('#'*28, f'loading LQAE model with following specifications: {config.model}')
     model = LqaeOpt(config.model, config.optimizer)
     
     dataset_config = config.dataset
@@ -92,7 +91,7 @@ def train(config):
 
 def get_args():
     parser = argparse.ArgumentParser(description="EnTex project training script")
-    parser.add_argument("--config_path", default='./entex/configs/test.yml', help="path to load yaml-like configurations")
+    parser.add_argument("--config", default='entex/configs/test.yml', help="path to load yaml-like configurations")
     args = parser.parse_args()
     return args
 
@@ -102,7 +101,7 @@ if __name__ == '__main__':
     #os.environ['WANDB_DIR'] = 'wandb/optexp1'
     
     args = get_args()
-    with open(args.config_path, 'r') as f:
+    with open(args.config, 'r') as f:
         config = EasyDict(yaml.safe_load(f))
         
     train(config=config)

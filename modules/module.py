@@ -162,7 +162,7 @@ class LanguageQuantizer(nn.Module):
             latent_input = self.input_to_latent(torch.reshape(x, (-1, x.shape[-1])))
             
             #TODO axis=1 or axi=-1?
-            latent_input = l2_normalize(latent_input, axis=-1)
+            latent_input = l2_normalize(latent_input, axis=1)
             latent_codebook = self.code_to_latent(codebook)
             latent_codebook = l2_normalize(latent_codebook, axis=1)
             sg_latent_codebook = latent_codebook.detach()

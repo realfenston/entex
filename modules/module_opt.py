@@ -90,7 +90,7 @@ class LanguageQuantizer(nn.Module):
         )
 
         encoding_indices = torch.topk(distances, k=self.quantizer_config.top_k_value, dim=-1, largest=False)[1]
-        encoding_indices, encodings, quantized = self.get_encoding_quantized(encoding_indices, codebook_size)
+        encoding_indices, encodings, quantized = self.get_encoding_quantized(encoding_indices, codebook_size, latent_input)
             
         #used in original paper, but quantized and x have a shape mismatch
         #please ensure hidden dim == codebook dim here
@@ -149,7 +149,7 @@ class LanguageQuantizer(nn.Module):
                 * self.quantizer_config.quantizer_loss_entropy
             )
         #e_latent_loss = torch.tensor(e_latent_loss).to(e_latent_loss.dev·ice).to(torch.float32)
-        loss = e_latent_loss + q_latent_loss + entropy_loss
+        loss = (e_latent_loss + q_latent_loss + entropy_loss) * self.quantizer_config.quantizer_loss_weight
 
         result_dict = dict(
             quantizer_loss=loss,
@@ -159,7 +159,7 @@ class LanguageQuantizer(nn.Module):
         )
         return result_dict
 
-    def get_encoding_quantized(self, encoding_indices, codebook_size, train=True):
+    def get_encoding_quantized(self, encoding_indices, codebook_size, latent_input, train=True):
         if self.quantizer_config.top_k_rnd:
             if train:
                 encoding_indices = torch.random.choice(encoding_indices, axis=-1)
@@ -176,11 +176,13 @@ class LanguageQuantizer(nn.Module):
             quantized = self.quantize(encodings)
             quantized = torch.mean(quantized, axis=-2)
             encoding_indices = encoding_indices[..., 0]
+        elif self.quantizer_config.gumbel_softmax:
+            encoding_indices = encoding_indices[..., 0]
+            encodings = F.one_hot(encoding_indices, codebook_size).to(torch.float32)
+            quantized = F.gumbel_softmax(latent_input, tau=1.0, hard=False)   
         else:
             encoding_indices = encoding_indices[..., 0]
-            encodings = F.one_hot(
-                encoding_indices, codebook_size
-            ).to(torch.float32)
+            encodings = F.one_hot(encoding_indices, codebook_size).to(torch.float32)
             quantized = self.quantize(encodings)
         return encoding_indices, encodings, quantized
     
